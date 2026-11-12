@@ -22,7 +22,7 @@ Noto Sans JP をもとに、文字の中心から4色で塗ったフォントで
 
 ## 使い方
 
-GitHub Releases の ZIP を解凍し、太さを 100〜900 の範囲で調整できる可変 TTF か、`static/` にある９種類の固定 TTF から使いたいファイルをインストールしてください。色付きで表示するには、OpenType の COLR v1 に対応したアプリが必要です。
+GitHub Releases の ZIP を解凍し、太さを 100〜900 の範囲で調整できる可変 TTF か、`static/` にある９種類の固定 TTF から使いたいファイルをインストールしてください。色付きで表示するには、OpenType の COLR v1 に対応したアプリが必要です。可変 TTF には SVG テーブルも入っているので、Safari でも色付きで表示できます。COLR v1 非対応ブラウザ向けの JavaScript 描画サンプルがリリース ZIP の `examples/js-rendering/` に同梱されていて、Web サイトのタイプテスターも同じ方法で描画しています。
 
 ## ビルド
 

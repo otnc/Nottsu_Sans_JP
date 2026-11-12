@@ -196,6 +196,9 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.specimen svg { display: block; max-width: 100%; height: auto; }
+.hero h1 svg { display: block; width: 100%; height: auto; }
+
 .footer {
   margin-top: 46px;
   padding-block: 20px 28px;

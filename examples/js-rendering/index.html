@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nottsu Sans JP · JS 描画サンプル</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #202320; background: #f7f7f2; }
+    main { max-width: 720px; margin-inline: auto; }
+    textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 0.5rem; }
+    .controls { display: flex; gap: 1rem; align-items: center; margin-block: 0.75rem; }
+    #preview { background: #fff; border: 1px solid #d5d9cf; border-radius: 8px; padding: 1rem; overflow: hidden; }
+    #preview svg { max-width: 100%; height: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Nottsu Sans JP · JS 描画サンプル</h1>
+    <p>COLR v1 に対応していないブラウザ (Safari など) でも色付きで表示するための描画例です。仕組みは同梱の <a href="./README.md">README</a> を参照してください。</p>
+    <textarea id="text" rows="3">色であそぶ、ことば。
+Aa1あア漢</textarea>
+    <div class="controls">
+      <label>太さ <input type="range" id="weight" min="100" max="900" value="400"></label>
+      <output id="weight-value">400</output>
+    </div>
+    <div id="preview">読み込み中…</div>
+  </main>
+
+  <script type="module">
+    import * as harfbuzz from 'https://cdn.jsdelivr.net/npm/harfbuzzjs@1.6.4/dist/index.mjs';
+    import { createColorRenderer } from './render.js';
+
+    // In the release ZIP this example sits in examples/js-rendering/, with
+    // the variable font two levels up. Adjust the path if you move things.
+    const renderer = await createColorRenderer(harfbuzz, '../../NottsuSansJP-VariableFont_wght.ttf').catch((error) => {
+      document.querySelector('#preview').textContent = `フォントを読み込めませんでした: ${error.message}`;
+      throw error;
+    });
+
+    const text = document.querySelector('#text');
+    const weight = document.querySelector('#weight');
+    const weightValue = document.querySelector('#weight-value');
+    const preview = document.querySelector('#preview');
+
+    function update() {
+      weightValue.value = weight.value;
+      preview.innerHTML = renderer.render(text.value, {
+        weight: Number(weight.value),
+        size: 68,
+        maxWidth: preview.clientWidth - 32,
+      });
+    }
+    text.addEventListener('input', update);
+    weight.addEventListener('input', update);
+    update();
+  </script>
+</body>
+</html>

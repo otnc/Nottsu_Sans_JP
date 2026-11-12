@@ -1,20 +1,39 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { withSourceFonts, distDirectory, readmeFile, licenseFile, fontFiles, readTables, readSweepColors, updateFontNames } = require('./build');
 
 async function checkFiles(directory, expected) {
   const entries = await fs.readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
-    assert(entry.name === 'static' ? entry.isDirectory() : entry.isFile(), `Invalid entry: ${entry.name}`);
+    assert(entry.name === 'static' || entry.name === 'examples' ? entry.isDirectory() : entry.isFile(), `Invalid entry: ${entry.name}`);
   }
   assert.deepEqual(entries.map(({ name }) => name).sort(), expected.toSorted(), `Unexpected or missing files in ${directory}`);
 }
 
-function checkTables(source, output) {
+async function checkExamples(directory) {
+  const sourceDirectory = path.resolve(__dirname, '..', 'examples', 'js-rendering');
+  const outputDirectory = path.join(directory, 'examples', 'js-rendering');
+  const [sourceFiles, outputFiles] = await Promise.all([
+    fs.readdir(sourceDirectory),
+    fs.readdir(outputDirectory),
+  ]);
+  assert.deepEqual(outputFiles.sort(), sourceFiles.sort(), 'Unexpected or missing files in dist/examples/js-rendering');
+  for (const name of sourceFiles) {
+    const [expected, actual] = await Promise.all([
+      fs.readFile(path.join(sourceDirectory, name)),
+      fs.readFile(path.join(outputDirectory, name)),
+    ]);
+    assert(expected.length > 0 && actual.equals(expected), `Invalid example file: ${name}`);
+  }
+}
+
+function checkTables(source, output, withSvg) {
   assert(source.has('head') && source.has('maxp') && source.has('glyf'), 'Required TrueType tables are missing');
   const expectedTags = [...source.keys()].filter((tag) => tag !== 'DSIG');
-  assert.deepEqual([...output.keys()].sort(), [...expectedTags, 'COLR', 'CPAL'].sort(), 'Unexpected or missing font tables');
+  const addedTags = withSvg ? ['COLR', 'CPAL', 'SVG '] : ['COLR', 'CPAL'];
+  assert.deepEqual([...output.keys()].sort(), [...expectedTags, ...addedTags].sort(), 'Unexpected or missing font tables');
   for (const tag of expectedTags) {
     const original = source.get(tag);
     const actual = output.get(tag);
@@ -86,10 +105,47 @@ function checkPaint(hb, bytes, tables, style, { palette, stops }) {
   }
 }
 
+function checkSvg(hb, bytes, tables, { palette, stops }) {
+  const svg = tables.get('SVG ');
+  assert(svg, 'Missing SVG table');
+  assert.equal(svg.readUInt16BE(0), 0, 'Expected SVG table version 0');
+  const indexOffset = svg.readUInt32BE(2);
+  const count = svg.readUInt16BE(indexOffset);
+  const documents = new Map();
+  for (let index = 0; index < count; index++) {
+    const entry = indexOffset + 2 + index * 12;
+    const startGlyph = svg.readUInt16BE(entry);
+    const endGlyph = svg.readUInt16BE(entry + 2);
+    const offset = indexOffset + svg.readUInt32BE(entry + 4);
+    const length = svg.readUInt32BE(entry + 8);
+    const stored = svg.subarray(offset, offset + length);
+    assert(stored[0] === 0x1f && stored[1] === 0x8b, 'SVG documents must be gzip compressed');
+    const document = zlib.gunzipSync(stored).toString('utf8');
+    for (let id = startGlyph; id <= endGlyph; id++) documents.set(id, document);
+  }
+
+  const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const font = new hb.Font(new hb.Face(new hb.Blob(data)));
+  const glyphCount = tables.get('maxp').readUInt16BE(4);
+  const sectorCount = stops.filter(([turn], index) => index + 1 < stops.length && turn < stops[index + 1][0]).length;
+  for (let id = 1; id < glyphCount; id++) {
+    const bounds = font.glyphExtents(id);
+    if (!bounds?.width || !bounds.height) continue;
+    const document = documents.get(id);
+    assert(document, `Missing SVG document for glyph ${id}`);
+    assert(document.includes(`<clipPath id="c${id}">`), `SVG document for glyph ${id} does not clip to its outline`);
+    assert.equal(document.split('<path').length - 1, sectorCount + 1, `Unexpected path count in SVG document for glyph ${id}`);
+    for (const [r, g, b] of palette) {
+      assert(document.includes(`fill="rgb(${r},${g},${b})"`), `SVG document for glyph ${id} is missing a palette color`);
+    }
+  }
+}
+
 async function main() {
   const directory = process.argv[2] ? path.resolve(process.argv[2]) : distDirectory;
   const staticFiles = fontFiles.filter(({ style }) => style !== undefined);
-  await checkFiles(directory, [fontFiles[0].output, 'OFL.txt', 'README.txt', 'static']);
+  await checkFiles(directory, [fontFiles[0].output, 'OFL.txt', 'README.txt', 'static', 'examples']);
+  await checkExamples(directory);
   await checkFiles(path.join(directory, 'static'), staticFiles.map(({ output }) => path.basename(output)));
   for (const [name, original] of [['OFL.txt', licenseFile], ['README.txt', readmeFile]]) {
     const [expected, actual] = await Promise.all([fs.readFile(original), fs.readFile(path.join(directory, name))]);
@@ -102,8 +158,9 @@ async function main() {
       try {
         const [original, bytes] = await Promise.all([fs.readFile(path.join(sourceDirectory, source)), fs.readFile(path.join(directory, output))]);
         const tables = readTables(bytes, true);
-        checkTables(readTables(original, true), tables);
+        checkTables(readTables(original, true), tables, style === undefined);
         checkPaint(hb, bytes, tables, style, colors);
+        if (style === undefined) checkSvg(hb, bytes, tables, colors);
         console.log(`Verified ${output}`);
       } catch (error) {
         throw new Error(`${output}: ${error.message}`, { cause: error });

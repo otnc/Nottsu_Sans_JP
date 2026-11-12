@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const sharp = require('sharp');
@@ -196,7 +197,7 @@ async function readGlyphCenters(source, tables) {
     if (!bounds?.width || !bounds.height) continue;
     const x = Math.round(bounds.xBearing + bounds.width / 2);
     const y = Math.round(bounds.yBearing + bounds.height / 2);
-    glyphs.push({ id, x, y, xDeltas: [], yDeltas: [] });
+    glyphs.push({ id, x, y, outline: font.glyphToPath(id), xDeltas: [], yDeltas: [] });
   }
   for (const [coordinate, weight] of coordinates) {
     if (coordinate === 0) continue;
@@ -316,6 +317,53 @@ function makeColorTable(glyphs, stops, coordinates) {
   return paintTranslateSize ? Buffer.concat([colr, makeVariationStore(glyphs, coordinates)]) : colr;
 }
 
+// Browsers and platforms without COLR v1 support (such as Safari) fall back
+// to the SVG table, so the variable font also carries every color glyph as
+// an SVG document: the outline clips one flat sector per sweep color span,
+// exactly like the COLR paint but with the default instance's center baked
+// in. Documents are stored gzip-compressed, as the SVG table allows.
+function makeSvgDocument({ id, x, y, outline }, stops, palette, unitsPerEm) {
+  const radius = 4 * unitsPerEm;
+  const point = (angle) => `${(x + radius * Math.cos(angle)).toFixed(1)} ${(y + radius * Math.sin(angle)).toFixed(1)}`;
+  const sectors = [];
+  for (let index = 0; index < stops.length - 1; index++) {
+    const [turn, colorIndex] = stops[index];
+    const nextTurn = stops[index + 1][0];
+    if (turn >= nextTurn) continue;
+    const start = turn * 2 * Math.PI;
+    const end = nextTurn * 2 * Math.PI;
+    const largeArc = Number(end - start > Math.PI);
+    const [r, g, b] = palette[colorIndex];
+    sectors.push(`<path d="M ${x} ${y} L ${point(start)} A ${radius} ${radius} 0 ${largeArc} 1 ${point(end)} Z" fill="rgb(${r},${g},${b})"/>`);
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg"><clipPath id="c${id}"><path d="${outline}"/></clipPath><g clip-path="url(#c${id})">${sectors.join('')}</g></svg>`;
+}
+
+function makeSvgTable(glyphs, stops, palette, unitsPerEm) {
+  const documents = glyphs.map((glyph) => {
+    const compressed = zlib.gzipSync(makeSvgDocument(glyph, stops, palette, unitsPerEm));
+    compressed.writeUInt32BE(0, 4); // Keep builds reproducible: no gzip timestamp.
+    return compressed;
+  });
+  const indexOffset = 10;
+  const entriesSize = 2 + documents.length * 12;
+  const table = Buffer.alloc(indexOffset + entriesSize + documents.reduce((size, document) => size + document.length, 0));
+  table.writeUInt16BE(0, 0);
+  table.writeUInt32BE(indexOffset, 2);
+  table.writeUInt16BE(documents.length, indexOffset);
+  let offset = entriesSize;
+  for (const [index, glyph] of glyphs.entries()) {
+    const entry = indexOffset + 2 + index * 12;
+    table.writeUInt16BE(glyph.id, entry);
+    table.writeUInt16BE(glyph.id, entry + 2);
+    table.writeUInt32BE(offset, entry + 4);
+    table.writeUInt32BE(documents[index].length, entry + 8);
+    documents[index].copy(table, indexOffset + offset);
+    offset += documents[index].length;
+  }
+  return table;
+}
+
 async function readSweepColors() {
   const { data, info } = await sharp(colorImage)
     .toColourspace('srgb')
@@ -363,7 +411,7 @@ async function readSweepColors() {
   return { palette, stops };
 }
 
-async function buildFont(source, output, { palette, stops }) {
+async function buildFont(source, output, { palette, stops }, { svg = false } = {}) {
   const sourceFile = await fs.stat(source);
   const outputFile = await fs.stat(output).catch((error) => {
     if (error.code !== 'ENOENT') throw error;
@@ -379,6 +427,7 @@ async function buildFont(source, output, { palette, stops }) {
   tables.set('name', updateFontNames(tables.get('name')));
   tables.set('CPAL', makePaletteTable(palette));
   tables.set('COLR', makeColorTable(glyphs, stops, coordinates));
+  if (svg) tables.set('SVG ', makeSvgTable(glyphs, stops, palette, tables.get('head').readUInt16BE(18)));
   tables.delete('DSIG'); // The original signature cannot verify the modified font.
 
   await fs.mkdir(path.dirname(path.resolve(output)), { recursive: true });
@@ -398,13 +447,16 @@ async function main() {
   const colors = await readSweepColors();
   await Promise.all([licenseFile, readmeFile].map((filename) => fs.access(filename)));
   await withSourceFonts(async (sourceDirectory) => {
-    for (const { source, output } of fontFiles) {
-      await buildFont(path.join(sourceDirectory, source), path.join(distDirectory, output), colors);
+    for (const { source, output, style } of fontFiles) {
+      // Only the variable font carries the SVG table: the static fonts
+      // would each grow by roughly the same amount again.
+      await buildFont(path.join(sourceDirectory, source), path.join(distDirectory, output), colors, { svg: style === undefined });
     }
   });
   await Promise.all([
     fs.copyFile(licenseFile, path.join(distDirectory, 'OFL.txt')),
     fs.copyFile(readmeFile, path.join(distDirectory, 'README.txt')),
+    fs.cp(path.join(rootDirectory, 'examples'), path.join(distDirectory, 'examples'), { recursive: true }),
   ]);
 }
 
